@@ -312,6 +312,50 @@
   }
   .logout-link:hover{color:var(--rust);}
   .user-badge{font-size:12px;color:var(--text-dim);margin-top:4px;}
+
+  /* Relatórios */
+  .report-trigger-btn{
+    background:var(--gold-soft);border:1px solid var(--gold);color:var(--gold);
+    font-family:'Inter',sans-serif;font-size:12.5px;font-weight:700;
+    padding:7px 14px;border-radius:8px;cursor:pointer;transition:background .15s;
+  }
+  .report-trigger-btn:hover{background:rgba(201,162,75,0.24);}
+
+  .modal-overlay{
+    position:fixed;inset:0;background:rgba(0,0,0,0.6);
+    display:none;align-items:center;justify-content:center;padding:20px;z-index:50;
+  }
+  .modal-overlay.open{display:flex;}
+  .modal-card{
+    width:100%;max-width:640px;max-height:86vh;overflow-y:auto;
+    background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:26px;
+  }
+  .modal-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:16px;}
+  .modal-head h2{font-family:'Fraunces',serif;font-weight:600;font-size:20px;margin:0 0 4px;}
+  .modal-head p{margin:0;color:var(--text-dim);font-size:13px;}
+  .modal-close{background:none;border:none;color:var(--text-dim);font-size:22px;cursor:pointer;line-height:1;padding:2px 4px;}
+  .modal-close:hover{color:var(--text);}
+  .report-controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:18px;}
+  .report-select{
+    appearance:none;-webkit-appearance:none;
+    background:var(--panel-raised) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M0 0l5 6 5-6z' fill='%239AA0AE'/></svg>") no-repeat right 12px center;
+    border:1px solid var(--border);color:var(--text);
+    border-radius:8px;padding:8px 30px 8px 12px;font-family:'Inter',sans-serif;font-size:13px;cursor:pointer;
+  }
+  .report-select:focus{outline:none;border-color:var(--gold);}
+  .report-name{font-family:'Fraunces',serif;font-weight:600;font-size:15px;margin:0 0 12px;}
+  #reportTableWrap .funnel{margin-bottom:0;}
+  .report-table{width:100%;border-collapse:collapse;font-size:13px;}
+  .report-table thead th{
+    text-align:left;padding:0 10px 10px;color:var(--text-dim);font-weight:600;font-size:11px;
+    text-transform:uppercase;letter-spacing:.04em;
+  }
+  .report-table thead th.num, .report-table td.num{text-align:right;font-variant-numeric:tabular-nums;}
+  .report-table tbody tr{border-top:1px solid var(--border);}
+  .report-table tbody td{padding:10px;}
+  .report-table tbody td:first-child{font-weight:600;}
+  .report-table tbody td.num{font-family:'Fraunces',serif;font-weight:600;color:var(--gold);}
+  .report-foot{display:flex;justify-content:flex-end;gap:10px;margin-top:18px;}
 </style>
 </head>
 <body>
@@ -379,7 +423,8 @@
     </div>
   </header>
 
-  <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
+  <div style="display:flex;justify-content:flex-end;gap:16px;margin-bottom:8px;">
+    <button class="report-trigger-btn" id="reportBtn">Relatório</button>
     <button class="logout-link" id="logoutBtn">Sair</button>
   </div>
 
@@ -456,6 +501,29 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="reportModal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <h2>Relatório de atividades</h2>
+          <p id="reportPeriodLabel"></p>
+        </div>
+        <button class="modal-close" id="reportCloseBtn" aria-label="Fechar">&times;</button>
+      </div>
+      <div class="report-controls">
+        <div class="filter-tabs" id="reportGranTabs">
+          <button data-g="day" class="active">Diário</button>
+          <button data-g="week">Semanal</button>
+        </div>
+        <select class="report-select" id="reportScopeSelect" style="display:none"></select>
+      </div>
+      <div id="reportTableWrap"></div>
+      <div class="report-foot">
+        <button class="btn" id="reportCsvBtn">Baixar CSV</button>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -482,6 +550,12 @@ let micOn = false;
 let micStream = null;
 let pendingDelete = null;
 let pendingClearDay = false;
+
+let reportPeriod = 'day';
+let reportScope = 'self';
+let reportProfiles = [];
+let reportRawCalls = [];
+let lastReportRows = [];
 
 const dateLabel = document.getElementById('dateLabel');
 dateLabel.textContent = new Date().toLocaleDateString('pt-BR', { weekday:'long', day:'numeric', month:'long' });
@@ -541,7 +615,9 @@ async function loadCalls(){
   try{
     const {data, error} = await sb.from('calls').select('*').order('started_at', {ascending:true});
     if(error) throw error;
-    calls = (data||[]).map(fromDbRow);
+    // A policy de RLS permite que admins leiam as ligações de todo mundo (usada no relatório);
+    // aqui filtramos para as próprias, senão o painel pessoal do admin mistura todo o time.
+    calls = (data||[]).filter(row=>row.user_id===currentUser.id).map(fromDbRow);
   }catch(e){
     calls = [];
     showFlash('Não consegui carregar os dados do servidor.');
@@ -1413,6 +1489,206 @@ async function renderInvitesList(){
     </div>
   `).join('');
 }
+
+// ---- relatórios ----
+function inPeriod(ts, period){
+  const now = new Date();
+  if(period==='day'){
+    const d1 = new Date(ts);
+    return d1.getFullYear()===now.getFullYear() && d1.getMonth()===now.getMonth() && d1.getDate()===now.getDate();
+  }
+  const start = startOfWeek(now);
+  const end = new Date(start); end.setDate(end.getDate()+7);
+  return ts>=start.getTime() && ts<end.getTime();
+}
+function tallyCalls(list){
+  return {
+    ligacoes: list.filter(c=>!c.standalone).length,
+    atendidas: list.filter(c=>c.answered).length,
+    propostas: list.filter(c=>c.proposal).length,
+    marcadas: list.filter(c=>c.meetingScheduled).length,
+    realizadas: list.filter(c=>c.meetingHeld).length,
+    semInteresse: list.filter(c=>c.noInterest).length,
+  };
+}
+async function fetchAllCallsForReport(){
+  try{
+    const { data, error } = await sb.from('calls').select('*');
+    if(error) throw error;
+    return (data||[]).map(row=>({ ...fromDbRow(row), userId: row.user_id }));
+  }catch(e){
+    showFlash('Não consegui carregar os dados do relatório.');
+    return [];
+  }
+}
+async function fetchTeamProfiles(){
+  try{
+    const { data, error } = await sb.from('profiles').select('id,name,role').order('name', {ascending:true});
+    if(error) throw error;
+    return data || [];
+  }catch(e){
+    return [];
+  }
+}
+
+async function openReportModal(){
+  reportPeriod = 'day';
+  reportScope = 'self';
+  document.querySelectorAll('#reportGranTabs button').forEach(b=>b.classList.toggle('active', b.dataset.g==='day'));
+
+  const scopeSelect = document.getElementById('reportScopeSelect');
+  const isAdmin = currentProfile && currentProfile.role === 'admin';
+  if(isAdmin){
+    if(reportProfiles.length===0){
+      reportProfiles = await fetchTeamProfiles();
+    }
+    scopeSelect.innerHTML = `
+      <option value="self">Eu</option>
+      <option value="all">Todos</option>
+      ${reportProfiles.filter(p=>p.id!==currentUser.id).map(p=>`<option value="${p.id}">${escapeHtml(p.name || 'Sem nome')}</option>`).join('')}
+    `;
+    scopeSelect.value = 'self';
+    scopeSelect.style.display = '';
+  } else {
+    scopeSelect.style.display = 'none';
+  }
+
+  document.getElementById('reportModal').classList.add('open');
+  await renderReportTable();
+}
+function closeReportModal(){
+  document.getElementById('reportModal').classList.remove('open');
+}
+
+async function renderReportTable(){
+  const now = new Date();
+  let periodLabelText;
+  if(reportPeriod==='day'){
+    periodLabelText = 'Hoje, ' + now.toLocaleDateString('pt-BR', {weekday:'long', day:'2-digit', month:'2-digit'});
+  } else {
+    const start = startOfWeek(now);
+    const end = new Date(start); end.setDate(end.getDate()+6);
+    const fmt = d=>d.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'});
+    periodLabelText = 'Semana de ' + fmt(start) + ' a ' + fmt(end);
+  }
+  document.getElementById('reportPeriodLabel').textContent = periodLabelText;
+
+  const wrap = document.getElementById('reportTableWrap');
+  wrap.innerHTML = '<p class="empty-note">Carregando…</p>';
+
+  const fallbackName = (profile)=> (profile && profile.name) || 'Sem nome';
+
+  let rows;
+  if(reportScope === 'self'){
+    const list = calls.filter(c=>inPeriod(c.startedAt, reportPeriod));
+    rows = [{ name: fallbackName(currentProfile), ...tallyCalls(list) }];
+  } else {
+    if(reportRawCalls.length===0){
+      reportRawCalls = await fetchAllCallsForReport();
+    }
+    const list = reportRawCalls.filter(c=>inPeriod(c.startedAt, reportPeriod));
+    if(reportScope === 'all'){
+      const byUser = {};
+      list.forEach(c=>{
+        if(!byUser[c.userId]) byUser[c.userId] = [];
+        byUser[c.userId].push(c);
+      });
+      rows = Object.keys(byUser).map(uid=>{
+        const profile = uid===currentUser.id ? currentProfile : reportProfiles.find(p=>p.id===uid);
+        return { name: fallbackName(profile), ...tallyCalls(byUser[uid]) };
+      }).sort((a,b)=>b.ligacoes-a.ligacoes);
+    } else {
+      const filtered = list.filter(c=>c.userId===reportScope);
+      const profile = reportProfiles.find(p=>p.id===reportScope);
+      rows = [{ name: fallbackName(profile), ...tallyCalls(filtered) }];
+    }
+  }
+
+  lastReportRows = rows;
+
+  const hasActivity = rows.some(r=>r.ligacoes || r.atendidas || r.propostas || r.marcadas || r.realizadas || r.semInteresse);
+  if(!hasActivity){
+    wrap.innerHTML = '<p class="empty-note">Nenhuma atividade registrada neste período.</p>';
+    return;
+  }
+
+  if(rows.length === 1){
+    const r = rows[0];
+    wrap.innerHTML = `
+      <h3 class="report-name">${escapeHtml(r.name)}</h3>
+      <div class="funnel">
+        <div class="stage"><span class="num">${r.ligacoes}</span><span class="label">Ligações feitas</span></div>
+        <div class="stage"><span class="num">${r.atendidas}</span><span class="label">Atendidas</span></div>
+        <div class="stage"><span class="num">${r.propostas}</span><span class="label">Evoluíram para proposta</span></div>
+        <div class="stage"><span class="num">${r.marcadas}</span><span class="label">Reuniões marcadas</span></div>
+        <div class="stage"><span class="num">${r.realizadas}</span><span class="label">Reuniões realizadas</span></div>
+        <div class="stage negative"><span class="num">${r.semInteresse}</span><span class="label">Sem interesse</span></div>
+      </div>
+    `;
+    return;
+  }
+
+  wrap.innerHTML = `
+    <table class="report-table">
+      <thead><tr>
+        <th>Usuário</th><th class="num">Ligações</th><th class="num">Atendidas</th><th class="num">Propostas</th>
+        <th class="num">Marcadas</th><th class="num">Realizadas</th><th class="num">Sem interesse</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map(r=>`
+          <tr>
+            <td>${escapeHtml(r.name)}</td>
+            <td class="num">${r.ligacoes}</td>
+            <td class="num">${r.atendidas}</td>
+            <td class="num">${r.propostas}</td>
+            <td class="num">${r.marcadas}</td>
+            <td class="num">${r.realizadas}</td>
+            <td class="num">${r.semInteresse}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function downloadReportCsv(){
+  if(!lastReportRows || lastReportRows.length===0) return;
+  const header = ['Usuário','Ligações','Atendidas','Propostas','Marcadas','Realizadas','Sem interesse'];
+  const lines = [header.join(';')];
+  lastReportRows.forEach(r=>{
+    lines.push([r.name, r.ligacoes, r.atendidas, r.propostas, r.marcadas, r.realizadas, r.semInteresse]
+      .map(v=>String(v).replace(/;/g, ',')).join(';'));
+  });
+  const csv = '﻿' + lines.join('\n');
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const periodTag = reportPeriod==='day' ? 'diario' : 'semanal';
+  a.href = url;
+  a.download = `relatorio-${periodTag}-${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+document.getElementById('reportBtn').addEventListener('click', openReportModal);
+document.getElementById('reportCloseBtn').addEventListener('click', closeReportModal);
+document.getElementById('reportModal').addEventListener('click', (e)=>{
+  if(e.target.id==='reportModal') closeReportModal();
+});
+document.getElementById('reportGranTabs').addEventListener('click', (e)=>{
+  const btn = e.target.closest('button');
+  if(!btn) return;
+  reportPeriod = btn.dataset.g;
+  document.querySelectorAll('#reportGranTabs button').forEach(b=>b.classList.toggle('active', b===btn));
+  renderReportTable();
+});
+document.getElementById('reportScopeSelect').addEventListener('change', (e)=>{
+  reportScope = e.target.value;
+  renderReportTable();
+});
+document.getElementById('reportCsvBtn').addEventListener('click', downloadReportCsv);
 
 initAuth();
 </script>
